@@ -1,3 +1,9 @@
 myenv/
 *.zip
+*.tar.gz
+*.tar.xz
+*.tar.bz2
+*.bin.gz
+*.bin
+*.npz
 node_modules/
