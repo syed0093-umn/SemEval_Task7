@@ -311,6 +311,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
+# Runtime: 15 minutes
 
 # %% [markdown]
 # ## BERT 2
@@ -407,6 +409,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
+# Runtime: 5 minutes
 
 # %% [markdown]
 # ### Infloat E5 multilingual large
@@ -486,6 +490,462 @@ def main():
     
     with open('monolingual_predictions_e5_large.json', 'w') as f:
         json.dump(predictions, f)
+
+if __name__ == "__main__":
+    main()
+    
+# Runtime: 22 minutes
+
+# %% [markdown]
+# ### FASTTEXT
+
+# %%
+# ! pip install fasttext
+
+# %%
+import fasttext
+import fasttext.util
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+import json
+from sklearn.metrics.pairwise import cosine_similarity
+import re
+import os
+
+class FastTextRetriever:
+    def __init__(self, model_name='cc.en.300.bin'):
+        """Initialize FastText retriever with specified model."""
+        # Download model if not exists
+        if not os.path.exists(model_name):
+            fasttext.util.download_model('en', if_exists='ignore')
+        self.model = fasttext.load_model(model_name)
+    
+    def preprocess_text(self, text):
+        """Clean and preprocess text."""
+        if pd.isna(text):
+            return ""
+        # Convert to string
+        text = str(text)
+        # Remove special characters
+        text = re.sub(r'[^\w\s]', ' ', text)
+        # Remove extra whitespace
+        text = ' '.join(text.split())
+        return text.lower()
+    
+    def get_embedding(self, text):
+        """Get FastText embedding for a single text."""
+        text = self.preprocess_text(text)
+        if not text:
+            return np.zeros(self.model.get_dimension())
+        return self.model.get_sentence_vector(text)
+    
+    def get_embeddings(self, texts, batch_size=32):
+        """Get FastText embeddings for a batch of texts."""
+        embeddings = []
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            batch_embeddings = [self.get_embedding(text) for text in batch]
+            embeddings.extend(batch_embeddings)
+        return np.array(embeddings)
+
+def process_fact_check(row):
+    """Process fact check text from row."""
+    try:
+        claim = str(row.get('claim', ''))
+        title = str(row.get('title', ''))
+        return f"{claim} {title}"
+    except:
+        return ""
+
+def process_post(row):
+    """Process post text from row."""
+    try:
+        return str(row.get('text', ''))
+    except:
+        return ""
+
+def main():
+    print("Loading FastText retriever...")
+    retriever = FastTextRetriever()
+    
+    print("Loading datasets...")
+    fact_checks = pd.read_csv('/home/csgrads/syed0093/SemEval_Task7/Task_Data/fact_checks.csv')
+    posts = pd.read_csv('/home/csgrads/syed0093/SemEval_Task7/Task_Data/posts.csv')
+    
+    with open('tasks.json') as f:
+        tasks = json.load(f)
+    
+    all_predictions = {}
+    
+    for language in tasks['monolingual'].keys():
+        print(f"\nProcessing {language}")
+        
+        # Filter fact checks for language
+        valid_fact_checks = tasks['monolingual'][language]['fact_checks']
+        language_fact_checks = fact_checks[fact_checks['fact_check_id'].isin(valid_fact_checks)]
+        
+        # Get fact check embeddings
+        print("Generating fact check embeddings...")
+        fact_check_texts = [process_fact_check(row) for _, row in language_fact_checks.iterrows()]
+        fact_check_vectors = retriever.get_embeddings(fact_check_texts)
+        fact_check_ids = language_fact_checks['fact_check_id'].tolist()
+        
+        # Process dev posts
+        dev_post_ids = tasks['monolingual'][language]['posts_dev']
+        dev_posts = posts[posts['post_id'].isin(dev_post_ids)]
+        
+        print("Processing posts...")
+        for _, post in tqdm(dev_posts.iterrows()):
+            post_text = process_post(post)
+            post_vector = retriever.get_embeddings([post_text])
+            
+            # Calculate similarities and get top matches
+            similarities = cosine_similarity(post_vector, fact_check_vectors).flatten()
+            top_indices = np.argsort(similarities)[-10:][::-1]
+            
+            # Store predictions
+            post_id = str(int(post['post_id']))
+            predictions = [str(fact_check_ids[i]) for i in top_indices]
+            all_predictions[post_id] = predictions
+    
+    print("\nSaving predictions...")
+    os.makedirs('predictions', exist_ok=True)
+    with open('monolingual_predictions_fasttext.json', 'w') as f:
+        json.dump(all_predictions, f)
+
+if __name__ == "__main__":
+    main()
+    
+# Runtime: 2 minutes
+
+# %% [markdown]
+# ### T5 Model
+
+# %%
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+import json
+from sklearn.metrics.pairwise import cosine_similarity
+import re
+import os
+from sentence_transformers import SentenceTransformer
+
+class GTRRetriever:
+    def __init__(self, model_name='sentence-transformers/gtr-t5-large'):
+        """Initialize GTR-T5 retriever with specified model."""
+        self.model = SentenceTransformer(model_name)
+    
+    def preprocess_text(self, text):
+        """Clean and preprocess text."""
+        if pd.isna(text):
+            return ""
+        # Convert to string
+        text = str(text)
+        # Remove special characters
+        text = re.sub(r'[^\w\s]', ' ', text)
+        # Remove extra whitespace
+        text = ' '.join(text.split())
+        return text.lower()
+    
+    def get_embedding(self, text):
+        """Get GTR-T5 embedding for a single text."""
+        text = self.preprocess_text(text)
+        if not text:
+            return np.zeros(768)  # GTR-T5-Large has 768 dimensions
+        return self.model.encode(text)
+    
+    def get_embeddings(self, texts, batch_size=32):
+        """Get GTR-T5 embeddings for a batch of texts."""
+        # Clean texts
+        processed_texts = [self.preprocess_text(text) for text in texts]
+        # Replace empty texts with a space to avoid errors
+        processed_texts = [text if text else " " for text in processed_texts]
+        # Use model's built-in batching
+        return self.model.encode(processed_texts, batch_size=batch_size)
+
+def process_fact_check(row):
+    """Process fact check text from row."""
+    try:
+        claim = str(row.get('claim', ''))
+        title = str(row.get('title', ''))
+        return f"{claim} {title}"
+    except:
+        return ""
+
+def process_post(row):
+    """Process post text from row."""
+    try:
+        return str(row.get('text', ''))
+    except:
+        return ""
+
+def main():
+    print("Loading GTR-T5 retriever...")
+    retriever = GTRRetriever()
+    
+    print("Loading datasets...")
+    fact_checks = pd.read_csv('/home/csgrads/syed0093/SemEval_Task7/Task_Data/fact_checks.csv')
+    posts = pd.read_csv('/home/csgrads/syed0093/SemEval_Task7/Task_Data/posts.csv')
+    
+    with open('tasks.json') as f:
+        tasks = json.load(f)
+    
+    all_predictions = {}
+    
+    for language in tasks['monolingual'].keys():
+        print(f"\nProcessing {language}")
+        
+        # Filter fact checks for language
+        valid_fact_checks = tasks['monolingual'][language]['fact_checks']
+        language_fact_checks = fact_checks[fact_checks['fact_check_id'].isin(valid_fact_checks)]
+        
+        # Get fact check embeddings
+        print("Generating fact check embeddings...")
+        fact_check_texts = [process_fact_check(row) for _, row in language_fact_checks.iterrows()]
+        fact_check_vectors = retriever.get_embeddings(fact_check_texts)
+        fact_check_ids = language_fact_checks['fact_check_id'].tolist()
+        
+        # Process dev posts
+        dev_post_ids = tasks['monolingual'][language]['posts_dev']
+        dev_posts = posts[posts['post_id'].isin(dev_post_ids)]
+        
+        print("Processing posts...")
+        for _, post in tqdm(dev_posts.iterrows()):
+            post_text = process_post(post)
+            post_vector = retriever.get_embeddings([post_text])
+            
+            # Calculate similarities and get top matches
+            similarities = cosine_similarity(post_vector, fact_check_vectors).flatten()
+            top_indices = np.argsort(similarities)[-10:][::-1]
+            
+            # Store predictions
+            post_id = str(int(post['post_id']))
+            predictions = [str(fact_check_ids[i]) for i in top_indices]
+            all_predictions[post_id] = predictions
+    
+    print("\nSaving predictions...")
+    os.makedirs('predictions', exist_ok=True)
+    with open('predictions/monolingual_predictions_gtr.json', 'w') as f:
+        json.dump(all_predictions, f)
+
+if __name__ == "__main__":
+    main()
+    
+# Runtime: 19 minutes
+
+# %% [markdown]
+# ### distilBERT
+
+# %%
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+import json
+from sklearn.metrics.pairwise import cosine_similarity
+import re
+import os
+from sentence_transformers import SentenceTransformer
+
+class DistilBERTRetriever:
+    def __init__(self, model_name='distilbert-base-nli-stsb-mean-tokens'):
+        """Initialize DistilBERT retriever with specified model."""
+        self.model = SentenceTransformer(model_name)
+    
+    def preprocess_text(self, text):
+        """Clean and preprocess text."""
+        if pd.isna(text):
+            return ""
+        # Convert to string
+        text = str(text)
+        # Remove special characters
+        text = re.sub(r'[^\w\s]', ' ', text)
+        # Remove extra whitespace
+        text = ' '.join(text.split())
+        return text.lower()
+    
+    def get_embeddings(self, texts):
+        inputs = self.tokenizer(texts, padding=True, truncation=True, return_tensors="pt")
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+        return outputs.last_hidden_state[:, 0, :].numpy()
+    
+    def get_embeddings(self, texts, batch_size=32):
+        """Get DistilBERT embeddings for a batch of texts."""
+        # Clean texts
+        processed_texts = [self.preprocess_text(text) for text in texts]
+        # Replace empty texts with a space to avoid errors
+        processed_texts = [text if text else " " for text in processed_texts]
+        # Use model's built-in batching with show_progress_bar
+        return self.model.encode(processed_texts, batch_size=batch_size, show_progress_bar=True)
+
+def process_fact_check(row):
+    """Process fact check text from row."""
+    try:
+        claim = str(row.get('claim', ''))
+        title = str(row.get('title', ''))
+        return f"{claim} {title}"
+    except:
+        return ""
+
+def process_post(row):
+    """Process post text from row."""
+    try:
+        return str(row.get('text', ''))
+    except:
+        return ""
+
+def main():
+    print("Loading DistilBERT retriever...")
+    retriever = DistilBERTRetriever()
+    
+    print("Loading datasets...")
+    fact_checks = pd.read_csv('/home/csgrads/syed0093/SemEval_Task7/Task_Data/fact_checks.csv')
+    posts = pd.read_csv('/home/csgrads/syed0093/SemEval_Task7/Task_Data/posts.csv')
+    
+    with open('tasks.json') as f:
+        tasks = json.load(f)
+    
+    all_predictions = {}
+    
+    for language in tasks['monolingual'].keys():
+        print(f"\nProcessing {language}")
+        
+        # Filter fact checks for language
+        valid_fact_checks = tasks['monolingual'][language]['fact_checks']
+        language_fact_checks = fact_checks[fact_checks['fact_check_id'].isin(valid_fact_checks)]
+        
+        # Get fact check embeddings
+        print("Generating fact check embeddings...")
+        fact_check_texts = [process_fact_check(row) for _, row in language_fact_checks.iterrows()]
+        fact_check_vectors = retriever.get_embeddings(fact_check_texts)
+        fact_check_ids = language_fact_checks['fact_check_id'].tolist()
+        
+        # Process dev posts
+        dev_post_ids = tasks['monolingual'][language]['posts_dev']
+        dev_posts = posts[posts['post_id'].isin(dev_post_ids)]
+        
+        print("Processing posts...")
+        for _, post in tqdm(dev_posts.iterrows()):
+            post_text = process_post(post)
+            post_vector = retriever.get_embeddings([post_text])
+            
+            # Calculate similarities and get top matches
+            similarities = cosine_similarity(post_vector, fact_check_vectors).flatten()
+            top_indices = np.argsort(similarities)[-10:][::-1]
+            
+            # Store predictions
+            post_id = str(int(post['post_id']))
+            predictions = [str(fact_check_ids[i]) for i in top_indices]
+            all_predictions[post_id] = predictions
+    
+    print("\nSaving predictions...")
+    os.makedirs('predictions', exist_ok=True)
+    with open('predictions/monolingual_predictions_distilBERT.json', 'w') as f:
+        json.dump(all_predictions, f)
+
+if __name__ == "__main__":
+    main()
+    
+# Runtime: 4 minutes
+
+# %%
+from transformers import AutoModel, AutoTokenizer
+from sentence_transformers import CrossEncoder
+import torch
+import json
+import pandas as pd
+from tqdm import tqdm
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+import os
+
+class EnhancedRetriever:
+    def __init__(self):
+        # Bi-encoder for initial retrieval
+        self.tokenizer = AutoTokenizer.from_pretrained('microsoft/mdeberta-v3-base')
+        self.model = AutoModel.from_pretrained('microsoft/mdeberta-v3-base')
+        # Cross-encoder for reranking
+        self.cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+    
+    def get_embeddings(self, texts):
+        inputs = self.tokenizer(texts, padding=True, truncation=True, return_tensors="pt")
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+        return outputs.last_hidden_state[:, 0, :].numpy()
+    
+    def rerank(self, query, candidates):
+        pairs = [[query, candidate] for candidate in candidates]
+        scores = self.cross_encoder.predict(pairs)
+        return scores
+
+def process_fact_check(row):
+    """Process fact check text from row."""
+    try:
+        claim = str(row.get('claim', ''))
+        title = str(row.get('title', ''))
+        return f"{claim} {title}"
+    except:
+        return ""
+
+def process_post(row):
+    """Process post text from row."""
+    try:
+        return str(row.get('text', ''))
+    except:
+        return ""
+
+def main():
+    retriever = EnhancedRetriever()
+    # ...existing code...
+    # After getting top_indices:
+    print("Loading datasets...")
+    fact_checks = pd.read_csv('/home/csgrads/syed0093/SemEval_Task7/Task_Data/fact_checks.csv')
+    posts = pd.read_csv('/home/csgrads/syed0093/SemEval_Task7/Task_Data/posts.csv')
+    
+    with open('tasks.json') as f:
+        tasks = json.load(f)
+    
+    all_predictions = {}
+    
+    for language in tasks['monolingual'].keys():
+        print(f"\nProcessing {language}")
+        
+        # Filter fact checks for language
+        valid_fact_checks = tasks['monolingual'][language]['fact_checks']
+        language_fact_checks = fact_checks[fact_checks['fact_check_id'].isin(valid_fact_checks)]
+        
+        # Get fact check embeddings
+        print("Generating fact check embeddings...")
+        fact_check_texts = [process_fact_check(row) for _, row in language_fact_checks.iterrows()]
+        fact_check_vectors = retriever.get_embeddings(fact_check_texts)
+        fact_check_ids = language_fact_checks['fact_check_id'].tolist()
+        
+        # Process dev posts
+        dev_post_ids = tasks['monolingual'][language]['posts_dev']
+        dev_posts = posts[posts['post_id'].isin(dev_post_ids)]
+        
+        print("Processing posts...")
+        for _, post in tqdm(dev_posts.iterrows()):
+            post_text = process_post(post)
+            post_vector = retriever.get_embeddings([post_text])
+            
+            # Calculate similarities and get top matches
+            similarities = cosine_similarity(post_vector, fact_check_vectors).flatten()
+            top_indices = np.argsort(similarities)[-10:][::-1]
+            
+            # Store predictions
+            post_id = str(int(post['post_id']))
+            reranked_scores = retriever.rerank(post_text, [fact_checks.iloc[i] for i in top_indices])
+            final_indices = top_indices[np.argsort(reranked_scores)[::-1]]
+            predictions = [str(fact_check_ids[i]) for i in final_indices]
+            all_predictions[post_id] = predictions
+    
+    print("\nSaving predictions...")
+    os.makedirs('predictions', exist_ok=True)
+    with open('predictions/monolingual_predictions_enhanced_retriever.json', 'w') as f:
+        json.dump(all_predictions, f)
 
 if __name__ == "__main__":
     main()
